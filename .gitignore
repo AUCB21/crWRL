@@ -1,0 +1,8 @@
+env/
+*.env
+results/
+__pychache__/
+*.pyc
+.vscode/
+logs/
+debug.log
