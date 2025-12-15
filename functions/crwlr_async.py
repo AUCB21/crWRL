@@ -1,4 +1,9 @@
 import sys
+import os
+
+# Add parent directory to path to import modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 import signal
 import json
@@ -13,8 +18,7 @@ import tldextract
 from tqdm.asyncio import tqdm
 import aiosocks
 from DataBase import CrawlDatabaseManager, CrawlSessionConfig, CrawlMetrics
-from buffer_handler import CrawlBufferHandler
-import os
+from functions.buffer_handler import CrawlBufferHandler
 from dotenv import load_dotenv
 
 logging.basicConfig(filename='./results/debug.log', level=logging.DEBUG, format='[%(levelname)s] %(asctime)s: %(message)s')
@@ -23,24 +27,7 @@ load_dotenv()
 
 logging.info("Loading .env and attempting to connect to the database")
 
-# Legacy PostgreSQL connection - kept for backwards compatibility
 # Now using SQLite through CrawlDatabaseManager for crawl data
-def try_connection():
-    """Legacy PostgreSQL connection test - deprecated, use --db flag instead"""
-    try:
-        from DataBase.config import DB_Config
-        db_connection = DB_Config(
-            db_endpoint=os.getenv("DB_HOST"),
-            db_port=os.getenv("DB_PORT")
-        )
-        db_connection.connect_db()
-        
-        logging.debug(f"Database connection established")
-
-        db_connection.close()
-    except Exception as e:
-        logging.error(f"Failed to connect to database: {str(e)}")
-
 
 
 # Colors
@@ -303,8 +290,20 @@ def parse_custom_headers(args):
     
     return custom_headers
 
-def normalize_url(url):
-    """Normalize URL by removing fragments and ensuring proper format"""
+def normalize_url(url, max_length=2000):
+    """Normalize URL by removing fragments and ensuring proper format
+    
+    Args:
+        url: URL to normalize
+        max_length: Maximum allowed URL length (default 2000 to stay well under 8190 byte HTTP limit)
+    
+    Returns:
+        Normalized URL or None if URL is too long
+    """
+    # Check raw URL length first
+    if len(url) > max_length:
+        return None
+        
     parsed = urlparse(url)
     # Remove fragment and normalize
     normalized = urlunparse((
@@ -315,6 +314,11 @@ def normalize_url(url):
         parsed.query,
         ''  # Remove fragment
     ))
+    
+    # Check normalized URL length
+    if len(normalized) > max_length:
+        return None
+        
     return normalized
 
 def is_same_domain(url1, url2):
@@ -470,6 +474,8 @@ async def crawl_url(session, url, base_domain, depth, args, custom_headers, sema
                         try:
                             data = await response.json()
                             potential_urls = extract_urls_from_json(data, url)
+                            # Filter out URLs that are too long
+                            potential_urls = [u for u in potential_urls if u is not None and len(u) <= 2000]
                         except json.JSONDecodeError:
                             if args.verbose:
                                 print(f"[{YELLOW}WARNING{END}] Failed to parse JSON from {url}")
@@ -485,9 +491,22 @@ async def crawl_url(session, url, base_domain, depth, args, custom_headers, sema
                                 
                             href = link.get('href')
                             
+                            # Skip if href is too long
+                            if len(href) > 2000:
+                                if args.verbose:
+                                    print(f"[{YELLOW}SKIPPED{END}] URL too long ({len(href)} bytes): {href[:100]}...")
+                                continue
+                            
                             # Resolve relative URLs
                             absolute_url = urljoin(url, href)
                             normalized = normalize_url(absolute_url)
+                            
+                            # Skip if normalization failed (URL too long)
+                            if normalized is None:
+                                if args.verbose:
+                                    print(f"[{YELLOW}SKIPPED{END}] Normalized URL too long: {absolute_url[:100]}...")
+                                continue
+                                
                             potential_urls.append(normalized)
                     
                     else:
@@ -495,7 +514,8 @@ async def crawl_url(session, url, base_domain, depth, args, custom_headers, sema
                         if args.verbose:
                             print(f"[{YELLOW}WARNING{END}] Unsupported content type {content_type} for {url}")
                     
-                    # logging.debug(f"Found {len(potential_urls)} potential URLs from content")
+                    if args.verbose:
+                        print(f"[{CYAN}DEBUG{END}] Found {len(potential_urls)} potential URLs from {url}")
                     
                     # Process potential URLs
                     for normalized in potential_urls:
@@ -525,6 +545,10 @@ async def crawl_url(session, url, base_domain, depth, args, custom_headers, sema
                             # Add URL to crawl queue if within depth limit
                             if depth < args.max_depth:
                                 new_urls.append((normalized, depth + 1))
+                                if args.verbose:
+                                    print(f"[{CYAN}QUEUED{END}] {normalized} (depth: {depth + 1})")
+                            elif args.verbose:
+                                print(f"[{YELLOW}SKIPPED{END}] {normalized} (max depth reached)")
                 else:
                     # logging.debug(f"Non-200 status for {url}: {response.status}")
                     
@@ -744,7 +768,12 @@ async def main():
     quitted = False
     
     try:
-        async with aiohttp.ClientSession(connector=connector) as session:
+        # Increase max line size and field size to handle large headers
+        async with aiohttp.ClientSession(
+            connector=connector,
+            max_line_size=16384,  # Increase from default 8190 to 16KB
+            max_field_size=16384   # Increase max header field size to 16KB
+        ) as session:
             with tqdm(desc="Crawling", unit="url", colour="cyan") as pbar:
                 while urls_to_visit and not shutdown_flag:
                     # Get batch of URLs to process
@@ -770,7 +799,7 @@ async def main():
                             # Only add URLs that haven't been visited yet
                             async with urls_lock:
                                 new_unique_urls = [u for u in result if u[0] not in visited_urls]
-                            urls_to_visit.extend(new_unique_urls)
+                                urls_to_visit.extend(new_unique_urls)
         
         # If we get here without interruption, mark as completed normally
         if not shutdown_flag:

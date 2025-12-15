@@ -6,3 +6,4 @@ __pychache__/
 .vscode/
 logs/
 debug.log
+functions/__pycache__/
