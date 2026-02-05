@@ -241,6 +241,12 @@ For more information: https://github.com/AUCB21/CRWLR
         metavar="URL"
     )
     parser.add_argument(
+        "--tor",
+        action="store_true",
+        dest="tor",
+        help="route requests through TOR network (uses socks5://127.0.0.1:9050)"
+    )
+    parser.add_argument(
         "--db",
         type=str,
         dest="database",
@@ -699,7 +705,12 @@ async def main():
         print(f"[{CYAN}EXCLUDE SUBDOMAINS{END}] {args.exclude_subdomains}")
     if args.proxy:
         print(f"[{CYAN}PROXY{END}] {args.proxy}")
-    if args.socks:
+    
+    # Handle TOR flag
+    if args.tor and not args.socks:
+        args.socks = "socks5://127.0.0.1:9050"
+        print(f"[{CYAN}TOR{END}] Routing through TOR network (127.0.0.1:9050)")
+    elif args.socks:
         print(f"[{CYAN}SOCKS{END}] {args.socks}")
     
     # Initialize database if requested
